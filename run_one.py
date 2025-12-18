@@ -10,12 +10,13 @@ from verified_dims_loader import apply_verified_dims_for_pdf, has_verified_dims
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python run_one.py <pdf_path>")
+        print("Usage: python run_one.py <pdf_path> [--llm]")
         raise SystemExit(2)
 
     pdf_path = sys.argv[1]
+    use_llm = "--llm" in sys.argv
 
-    features = extract_features(pdf_path)
+    features = extract_features(pdf_path, use_llm=use_llm)
 
     if has_verified_dims(pdf_path):
         features = apply_verified_dims_for_pdf(features, pdf_path)

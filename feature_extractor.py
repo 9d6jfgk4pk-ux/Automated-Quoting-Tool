@@ -16,6 +16,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import pdfplumber
+from llm_assistant import enrich_features_with_llm
 
 
 def _f(x: str) -> Optional[float]:
@@ -86,7 +87,63 @@ RE_GROOVE = re.compile(
 RE_MACHINE_FINISH = re.compile(r"(?i)\bmachine\s+finish\b.*\ball\s+over\b")
 
 
-def extract_features(pdf_path: str) -> Dict[str, Any]:
+def _build_feature_groups(drill_thru: List[Dict[str, Any]], tapped: List[Dict[str, Any]], cbore: List[Dict[str, Any]], grooves: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return {
+        "drill_thru": drill_thru,
+        "tapped": tapped,
+        "counterbore": cbore,
+        "grooves": grooves,
+    }
+
+
+def _merge_llm_features(base: Dict[str, Any], llm_features: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(base)
+    merged_warnings = list(merged.get("warnings") or [])
+
+    # Notes: combine unique entries
+    llm_notes = llm_features.get("notes") or []
+    note_set = []
+    for n in (merged.get("notes") or []):
+        val = str(n).strip()
+        if val:
+            note_set.append(val)
+    for n in llm_notes:
+        val = str(n).strip()
+        if val and val not in note_set:
+            note_set.append(val)
+    merged_notes = note_set
+
+    holes = llm_features.get("holes") or {}
+    grooves = llm_features.get("grooves") or []
+
+    # Prefer LLM-provided feature groups when present
+    feature_groups = {
+        "drill_thru": holes.get("drill_thru") or merged.get("features", {}).get("drill_thru") or [],
+        "counterbore": holes.get("counterbore") or merged.get("features", {}).get("counterbore") or [],
+        "tapped": holes.get("tapped") or merged.get("features", {}).get("tapped") or [],
+        "grooves": grooves or merged.get("features", {}).get("grooves") or [],
+    }
+
+    merged.update({
+        "notes": merged_notes,
+        "features": feature_groups,
+        "holes": {
+            "drill_thru": feature_groups.get("drill_thru") or [],
+            "counterbore": feature_groups.get("counterbore") or [],
+            "tapped": feature_groups.get("tapped") or [],
+        },
+        "grooves": feature_groups.get("grooves") or [],
+        "llm_used": True,
+        "llm_warnings": llm_features.get("warnings") or [],
+        "llm_raw": llm_features.get("llm_raw"),
+    })
+
+    merged_warnings.extend(merged.get("llm_warnings") or [])
+    merged["warnings"] = merged_warnings
+    return merged
+
+
+def extract_features(pdf_path: str, use_llm: bool = False) -> Dict[str, Any]:
     text = _extract_pdf_text(pdf_path)
     warnings: List[str] = []
 
@@ -204,14 +261,26 @@ def extract_features(pdf_path: str) -> Dict[str, Any]:
     if grooves and all(g.get("count") is None for g in grooves):
         warnings.append("Grooves detected but count not stated; default assumption will be required for routing/time.")
 
-    return {
+    feature_groups = _build_feature_groups(drill_thru, tapped, cbore, grooves)
+
+    base = {
         "drawing_no": drawing_no,
         "title": title,
         "material": material,
         "finished_weight_kg": finished_weight_kg,
         "notes": notes,
         "holes": {"drill_thru": drill_thru, "tapped": tapped, "counterbore": cbore},
+        "features": feature_groups,
         "grooves": grooves,
         "warnings": warnings,
         "raw_text": text,
+        "llm_used": False,
     }
+
+    if use_llm:
+        llm_res = enrich_features_with_llm(text)
+        if llm_res.get("ok"):
+            return _merge_llm_features(base, llm_res.get("features") or {})
+        base.setdefault("warnings", []).append(f"LLM feature assist unavailable: {llm_res.get('error')}")
+
+    return base
