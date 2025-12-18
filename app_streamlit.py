@@ -20,6 +20,8 @@ from route_builder import build_route
 from machine_allocator import allocate_machines
 from time_model import estimate_times
 from exporters import export_quote_bundle
+from llm_assistant import review_route_with_llm
+from llm_client import llm_available
 
 # -----------------------------
 # Local folders
@@ -99,12 +101,12 @@ def run_picker_for_pdf(pdf_path: str) -> Dict[str, Any]:
         return {"ok": False, "error": str(e), "out_path": str(out_path)}
 
 
-def run_pipeline(pdf_path: str, outdir: str) -> Dict[str, Any]:
+def run_pipeline(pdf_path: str, outdir: str, use_llm: bool = False) -> Dict[str, Any]:
     """
     Runs the pipeline. Requires verified dims already present.
     Returns result dict incl. export_paths.
     """
-    features = extract_features(pdf_path)
+    features = extract_features(pdf_path, use_llm=use_llm)
 
     if not has_verified_dims(pdf_path):
         features.setdefault("warnings", []).append("No verified dims JSON found. Run picker first.")
@@ -132,7 +134,7 @@ def run_pipeline(pdf_path: str, outdir: str) -> Dict[str, Any]:
         },
         "verified_bands_mm": features.get("verified_bands_mm"),
         "notes": features.get("notes", []),
-        "features": features.get("holes", {}),
+        "features": features.get("features") or features.get("holes", {}),
         "route": route,
         "totals": {
             "total_min": round(total_min, 2),
@@ -144,6 +146,11 @@ def run_pipeline(pdf_path: str, outdir: str) -> Dict[str, Any]:
     paths = export_quote_bundle(result, outdir=outdir)
     result["export_paths"] = paths
     result["status"] = "OK"
+
+    if use_llm:
+        sanity = review_route_with_llm(result.get("features", {}), route)
+        result["llm_route_feedback"] = sanity
+
     return result
 
 
@@ -257,6 +264,14 @@ st.subheader("5) One-click run")
 st.write("This will:")
 st.write("1) open the picker → 2) save verified dims → 3) run route+time → 4) export XLSX + CSV/JSON → 5) show results")
 
+use_llm_assist = st.checkbox(
+    "Use GPT-5.2 assist (feature extraction + route sanity)",
+    value=llm_available(),
+    help="Requires OPENAI_API_KEY/LLM_API_KEY. Falls back to deterministic pipeline if unavailable.",
+)
+if use_llm_assist and not llm_available():
+    st.warning("LLM assist requested but no API key configured; proceeding without it.")
+
 if st.button("Run picker → then route/time → export", type="primary"):
     # 1) picker
     with st.spinner("Picker running… complete the popup and close it…"):
@@ -272,7 +287,7 @@ if st.button("Run picker → then route/time → export", type="primary"):
 
     # 2) pipeline
     with st.spinner("Running route/time + exports…"):
-        res = run_pipeline(selected_pdf, outdir=str(OUTPUT_DIR))
+        res = run_pipeline(selected_pdf, outdir=str(OUTPUT_DIR), use_llm=use_llm_assist and llm_available())
     st.session_state["last_result"] = res
     st.success("Complete.")
     st.rerun()
@@ -307,6 +322,26 @@ if res:
 
         with st.expander("Full JSON result"):
             st.json(res)
+
+        if res.get("llm_route_feedback"):
+            fb = res.get("llm_route_feedback") or {}
+            st.subheader("LLM route sanity feedback")
+            if fb.get("ok"):
+                col_f1, col_f2, col_f3 = st.columns(3)
+                with col_f1:
+                    st.write("Observations")
+                    for o in fb.get("observations", []):
+                        st.write("- " + str(o))
+                with col_f2:
+                    st.write("Missing ops")
+                    for o in fb.get("missing_ops", []):
+                        st.write("- " + str(o))
+                with col_f3:
+                    st.write("Timing flags")
+                    for o in fb.get("timing_flags", []):
+                        st.write("- " + str(o))
+            else:
+                st.warning(f"LLM feedback unavailable: {fb.get('error')}")
 
         st.subheader("Downloads")
         paths = res.get("export_paths") or {}

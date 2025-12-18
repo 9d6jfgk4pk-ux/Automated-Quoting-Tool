@@ -11,11 +11,12 @@ from route_builder import build_route
 from machine_allocator import allocate_machines
 from time_model import estimate_times
 from exporters import export_quote_bundle
+from llm_assistant import review_route_with_llm
 
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python run_quote.py <pdf_path> [--outdir <folder>] [--no-print]")
+        print("Usage: python run_quote.py <pdf_path> [--outdir <folder>] [--llm] [--no-print]")
         raise SystemExit(2)
 
     pdf_path = sys.argv[1]
@@ -24,6 +25,8 @@ def main():
 
     outdir = "outputs"
     no_print = False
+    use_llm = "--llm" in sys.argv
+
     if "--outdir" in sys.argv:
         i = sys.argv.index("--outdir")
         if i + 1 >= len(sys.argv):
@@ -32,7 +35,7 @@ def main():
     if "--no-print" in sys.argv:
         no_print = True
 
-    features = extract_features(pdf_path)
+    features = extract_features(pdf_path, use_llm=use_llm)
 
     if has_verified_dims(pdf_path):
         features = apply_verified_dims_for_pdf(features, pdf_path)
@@ -62,7 +65,7 @@ def main():
         },
         "verified_bands_mm": features.get("verified_bands_mm"),
         "notes": features.get("notes", []),
-        "features": features.get("holes", {}),
+        "features": features.get("features") or features.get("holes", {}),
         "route": route,
         "totals": {
             "total_min": round(total_min, 2),
@@ -74,6 +77,9 @@ def main():
     paths = export_quote_bundle(result, outdir=outdir)
     result["export_paths"] = paths
     result["status"] = "OK"
+
+    if use_llm:
+        result["llm_route_feedback"] = review_route_with_llm(result.get("features", {}), route)
 
     if not no_print:
         print(json.dumps(result, indent=2))
